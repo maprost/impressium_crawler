@@ -93,7 +93,7 @@ func (i Imprint) String() string {
 }
 
 func ImprintCSVHeader() string {
-	return fmt.Sprintln(", Imprint-Address, Imprint-Zip, Imprint-City, Imprint-Email")
+	return fmt.Sprint(", Imprint-Address, Imprint-Zip, Imprint-City, Imprint-Email")
 }
 
 func (i Imprint) CSV() string {
