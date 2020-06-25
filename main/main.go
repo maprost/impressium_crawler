@@ -22,5 +22,14 @@ func main() {
 	}
 
 	cache := imprint_crawler.CrawlMainPages(links)
-	cache.CSV()
+
+	err = cache.CSV()
+	if err != nil {
+		panic(err)
+	}
+
+	err = cache.Save()
+	if err != nil {
+		panic(err)
+	}
 }

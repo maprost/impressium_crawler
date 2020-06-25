@@ -19,7 +19,7 @@ const (
 )
 
 type MainPage struct {
-	Link     string
+	Given    string
 	Redirect string
 	MainUrl  string
 	Title    string
@@ -37,7 +37,7 @@ type MainPage struct {
 }
 
 func (p MainPage) String() string {
-	s := fmt.Sprintln("Link: ", p.Link)
+	s := fmt.Sprintln("Given: ", p.Given)
 	s += fmt.Sprintln("Flag: ", p.Flag)
 	s += fmt.Sprintln("Title: ", p.Title)
 	s += fmt.Sprintln("Error: ", p.Err)
@@ -59,11 +59,11 @@ func (p MainPage) String() string {
 }
 
 func CSVHeader() string {
-	return fmt.Sprintln("Link, Redirect, MainUrl, Title, Address, Zip, City, Email", ImprintCSVHeader())
+	return fmt.Sprintln("Given, Redirect, MainUrl, Title, Address, Zip, City, Email", ImprintCSVHeader())
 }
 
 func (p MainPage) CSV() string {
-	return fmt.Sprintln(p.Link, " ,", p.Redirect, " ,", p.MainUrl, " ,", p.Title, " ,", p.Address, " ,", p.Zip, " ,", p.City, " ,", p.Email, p.BestImprint.CSV())
+	return fmt.Sprintln(p.Given, " ,", p.Redirect, " ,", p.MainUrl, " ,", p.Title, " ,", p.Address, " ,", p.Zip, " ,", p.City, " ,", p.Email, p.BestImprint.CSV())
 }
 
 type Imprint struct {
@@ -125,14 +125,15 @@ func CrawlMainPages(links []string) *Cache {
 	return cache
 }
 
-func CrawlMainPage(link string) MainPage {
+func CrawlMainPage(given string) MainPage {
 	mainPage := MainPage{
-		Link:        link,
+		Given:       given,
 		BestImprint: &Imprint{},
 		Imprints:    make(map[string]*Imprint),
 		Contacts:    make(map[string]*Imprint),
 	}
 
+	link := getLinkFromGiven(given)
 	resp, err := http.Get(link)
 	if err != nil {
 		mainPage.Err = err
@@ -140,11 +141,11 @@ func CrawlMainPage(link string) MainPage {
 	}
 
 	mainPage.Redirect = resp.Request.URL.String()
-	if mainPage.Redirect != mainPage.Link {
+	if mainPage.Redirect != link {
 		r := strings.Replace(mainPage.Redirect, "http://", "", 1)
 		r = strings.Replace(r, "http://", "", 1)
 
-		l := strings.Replace(mainPage.Link, "http://", "", 1)
+		l := strings.Replace(link, "http://", "", 1)
 		l = strings.Replace(l, "http://", "", 1)
 
 		if r != l {
@@ -436,4 +437,11 @@ func ZipCityTrimmer(zipLine string) (string, string) {
 	}
 
 	return zip, trim(zipLine[zipStartIndex+6 : cityEndIndex])
+}
+
+func getLinkFromGiven(given string) string {
+	if atIndex := strings.Index(given, "@"); atIndex != -1 {
+		return given[atIndex+1:]
+	}
+	return given
 }
