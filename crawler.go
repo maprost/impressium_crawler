@@ -7,25 +7,44 @@ import (
 	"net/url"
 	"regexp"
 	"strings"
+	"sync"
 	"time"
 
+	"github.com/Jeffail/tunny"
 	"golang.org/x/net/html"
 )
 
+const (
+	LinkRedirectDiffers = "LinkRedirectDiffers"
+)
+
 type MainPage struct {
-	Link        string
-	Redirect    string
-	Title       string
-	Err         error
-	Imprints    map[string]*Imprint
-	Contacts    map[string]*Imprint
+	Link     string
+	Redirect string
+	MainUrl  string
+	Title    string
+	Err      error
+	Flag     string
+
+	Address     string
+	Zip         string
+	City        string
+	Email       string
 	BestImprint *Imprint
+
+	Imprints map[string]*Imprint
+	Contacts map[string]*Imprint
 }
 
 func (p MainPage) String() string {
 	s := fmt.Sprintln("Link: ", p.Link)
+	s += fmt.Sprintln("Flag: ", p.Flag)
 	s += fmt.Sprintln("Title: ", p.Title)
 	s += fmt.Sprintln("Error: ", p.Err)
+	s += fmt.Sprintln("Address: ", p.Address)
+	s += fmt.Sprintln("Zip: ", p.Zip)
+	s += fmt.Sprintln("City: ", p.City)
+	s += fmt.Sprintln("Email: ", p.Email)
 	s += fmt.Sprintln("BestImprint: ", p.BestImprint)
 	s += fmt.Sprintln("Imprint:")
 	for _, i := range p.Imprints {
@@ -39,6 +58,14 @@ func (p MainPage) String() string {
 	return s
 }
 
+func CSVHeader() string {
+	return fmt.Sprintln("Link, Redirect, MainUrl, Title, Address, Zip, City, Email", ImprintCSVHeader())
+}
+
+func (p MainPage) CSV() string {
+	return fmt.Sprintln(p.Link, " ,", p.Redirect, " ,", p.MainUrl, " ,", p.Title, " ,", p.Address, " ,", p.Zip, " ,", p.City, " ,", p.Email, p.BestImprint.CSV())
+}
+
 type Imprint struct {
 	Tag  string
 	Link string
@@ -47,6 +74,7 @@ type Imprint struct {
 	Name    string
 	Address string
 	Zip     string
+	City    string
 	Email   string
 }
 
@@ -58,25 +86,51 @@ func (i Imprint) String() string {
 	s += fmt.Sprintln("\tName: ", i.Name)
 	s += fmt.Sprintln("\tAddress: ", i.Address)
 	s += fmt.Sprintln("\tZip: ", i.Zip)
+	s += fmt.Sprintln("\tCity: ", i.City)
 	s += fmt.Sprintln("\tEmail: ", i.Email)
 
 	return s
 }
 
+func ImprintCSVHeader() string {
+	return fmt.Sprintln(", Imprint-Address, Imprint-Zip, Imprint-City, Imprint-Email")
+}
+
+func (i Imprint) CSV() string {
+	return fmt.Sprint(" ,", i.Address, " ,", i.Zip, " ,", i.City, " ,", i.Email)
+}
+
 func CrawlMainPages(links []string) *Cache {
 	cache := NewCache()
-	for _, link := range links {
+	cacheMutex := sync.Mutex{}
+
+	pool := tunny.NewFunc(20, func(payload interface{}) interface{} {
+		var result []byte
+		link := payload.(string)
+
+		cacheMutex.Lock()
 		cache.MainPages[link] = CrawlMainPage(link)
+		cacheMutex.Unlock()
+
+		return result
+	})
+	defer pool.Close()
+
+	start := time.Now()
+	for _, link := range links {
+		pool.Process(link)
 	}
+	fmt.Println("Process time:", time.Since(start))
 
 	return cache
 }
 
 func CrawlMainPage(link string) MainPage {
 	mainPage := MainPage{
-		Link:     link,
-		Imprints: make(map[string]*Imprint),
-		Contacts: make(map[string]*Imprint),
+		Link:        link,
+		BestImprint: &Imprint{},
+		Imprints:    make(map[string]*Imprint),
+		Contacts:    make(map[string]*Imprint),
 	}
 
 	resp, err := http.Get(link)
@@ -86,11 +140,26 @@ func CrawlMainPage(link string) MainPage {
 	}
 
 	mainPage.Redirect = resp.Request.URL.String()
+	if mainPage.Redirect != mainPage.Link {
+		r := strings.Replace(mainPage.Redirect, "http://", "", 1)
+		r = strings.Replace(r, "http://", "", 1)
+
+		l := strings.Replace(mainPage.Link, "http://", "", 1)
+		l = strings.Replace(l, "http://", "", 1)
+
+		if r != l {
+			mainPage.Flag = LinkRedirectDiffers
+		}
+	}
 
 	defer resp.Body.Close()
 	z := html.NewTokenizer(resp.Body)
 
 	firstTitle := false
+	zipMatch := false
+	emailMatch := false
+	lastValue := ""
+
 	loop := true
 	for loop {
 		tokenType := z.Next()
@@ -118,9 +187,32 @@ func CrawlMainPage(link string) MainPage {
 					continue
 				}
 				tokenValue := z.Token()
-				mainPage.Title = tokenValue.String()
+				mainPage.Title = trim(tokenValue.String())
 				firstTitle = true
 			}
+
+		case tokenType == html.TextToken:
+			token := z.Token()
+			value := token.String()
+
+			// check zip code
+			if zipMatch == false {
+				zipMatch, _ = regexp.MatchString("[0-9][0-9][0-9][0-9][0-9] [A-Z][a-z]", value)
+				if zipMatch {
+					mainPage.Address = trim(lastValue)
+					mainPage.Zip, mainPage.City = ZipCityTrimmer(value)
+				}
+			}
+
+			// check email
+			if emailMatch == false {
+				emailMatch, _ = regexp.MatchString("^[a-zA-Z0-9.!#$%&'*+/=?^_`{|}~-]+@[a-zA-Z0-9](?:[a-zA-Z0-9-]{0,61}[a-zA-Z0-9])?(?:\\.[a-zA-Z0-9](?:[a-zA-Z0-9-]{0,61}[a-zA-Z0-9])?)*$", value)
+				if emailMatch {
+					mainPage.Email = trim(value)
+				}
+			}
+
+			lastValue = value
 		}
 	}
 
@@ -247,7 +339,7 @@ func crawlImprint(imprint *Imprint) {
 				if zipMatch {
 					imprint.Name = trim(lastLastValue)
 					imprint.Address = trim(lastValue)
-					imprint.Zip = ZipTrimmer(value)
+					imprint.Zip, imprint.City = ZipCityTrimmer(value)
 				}
 			}
 
@@ -270,8 +362,15 @@ func trim(s string) string {
 	s = strings.ReplaceAll(s, "\n", "")
 	s = strings.ReplaceAll(s, "\r", "")
 	s = strings.ReplaceAll(s, "\t", "")
+	s = strings.ReplaceAll(s, ",", "")
 	s = strings.TrimLeft(s, " ")
 	s = strings.TrimRight(s, " ")
+
+	oldS := ""
+	for oldS != s {
+		oldS = s
+		s = strings.ReplaceAll(oldS, "  ", " ")
+	}
 
 	return s
 }
@@ -316,15 +415,25 @@ func chooseBestImprint(mainPage *MainPage) {
 	mainPage.BestImprint = secondBest
 }
 
-func ZipTrimmer(zip string) string {
+func ZipCityTrimmer(zipLine string) (string, string) {
 	r, err := regexp.Compile("[0-9][0-9][0-9][0-9][0-9] [A-Z][a-z]")
 	if err != nil {
 		panic(err)
 	}
-	indexes := r.FindStringSubmatchIndex(zip)
+	indexes := r.FindStringSubmatchIndex(zipLine)
 	if len(indexes) == 0 {
 		panic("Missing indexes")
 	}
 
-	return zip[indexes[0] : indexes[0]+5]
+	zipStartIndex := indexes[0]
+	zip := zipLine[zipStartIndex : zipStartIndex+5]
+
+	cityEndIndex := strings.Index(zipLine[zipStartIndex+6:], " ")
+	if cityEndIndex == -1 {
+		cityEndIndex = len(zipLine)
+	} else {
+		cityEndIndex = zipStartIndex + 6 + cityEndIndex
+	}
+
+	return zip, trim(zipLine[zipStartIndex+6 : cityEndIndex])
 }

@@ -21,5 +21,6 @@ func main() {
 		fmt.Println(l)
 	}
 
-	fmt.Println(imprint_crawler.CrawlMainPages(links))
+	cache := imprint_crawler.CrawlMainPages(links)
+	cache.CSV()
 }

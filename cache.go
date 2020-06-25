@@ -6,7 +6,10 @@ import (
 	"os"
 )
 
-const path = "cache.json"
+const (
+	jsonPath = "cache.json"
+	csvPath  = "cache.csv"
+)
 
 type Cache struct {
 	MainPages map[string]MainPage
@@ -22,7 +25,7 @@ func NewCache() *Cache {
 }
 
 func (c *Cache) Load() error {
-	bytes, err := ioutil.ReadFile(path)
+	bytes, err := ioutil.ReadFile(jsonPath)
 	if err != nil {
 		return err
 	}
@@ -36,5 +39,15 @@ func (c *Cache) Save() error {
 		return err
 	}
 
-	return ioutil.WriteFile(path, bytes, os.ModePerm)
+	return ioutil.WriteFile(jsonPath, bytes, os.ModePerm)
+}
+
+func (c *Cache) CSV() error {
+	s := CSVHeader()
+
+	for _, p := range c.MainPages {
+		s += p.CSV()
+	}
+
+	return ioutil.WriteFile(csvPath, []byte(s), os.ModePerm)
 }
