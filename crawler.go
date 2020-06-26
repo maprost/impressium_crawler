@@ -1,11 +1,12 @@
 package imprint_crawler
 
 import (
+	"crypto/tls"
 	"errors"
 	"fmt"
+	"net"
 	"net/http"
 	"net/url"
-	"regexp"
 	"strings"
 	"sync"
 	"time"
@@ -16,20 +17,37 @@ import (
 
 const (
 	LinkRedirectDiffers = "LinkRedirectDiffers"
+	goRoutines          = 50
 )
+
+var client = http.Client{
+	Timeout: 5 * time.Second,
+	Transport: &http.Transport{
+		Proxy: http.ProxyFromEnvironment,
+		DialContext: (&net.Dialer{
+			Timeout:   5 * time.Second,
+			KeepAlive: 5 * time.Second,
+			DualStack: true,
+		}).DialContext,
+		ForceAttemptHTTP2:     true,
+		MaxIdleConns:          100,
+		IdleConnTimeout:       5 * time.Second,
+		TLSHandshakeTimeout:   5 * time.Second,
+		ExpectContinueTimeout: 1 * time.Second,
+		TLSClientConfig:       &tls.Config{InsecureSkipVerify: true},
+	},
+}
 
 type MainPage struct {
 	Given    string
 	Redirect string
-	MainUrl  string
-	Title    string
+	BaseUrl  string
+	Title    TitleCheck
 	Err      error
 	Flag     string
 
-	Address     string
-	Zip         string
-	City        string
-	Email       string
+	Address     AddressCheck
+	Email       EMailCheck
 	BestImprint *Imprint
 
 	Imprints map[string]*Imprint
@@ -41,9 +59,9 @@ func (p MainPage) String() string {
 	s += fmt.Sprintln("Flag: ", p.Flag)
 	s += fmt.Sprintln("Title: ", p.Title)
 	s += fmt.Sprintln("Error: ", p.Err)
-	s += fmt.Sprintln("Address: ", p.Address)
-	s += fmt.Sprintln("Zip: ", p.Zip)
-	s += fmt.Sprintln("City: ", p.City)
+	s += fmt.Sprintln("Street: ", p.Address.Street())
+	s += fmt.Sprintln("Zip: ", p.Address.Zip())
+	s += fmt.Sprintln("City: ", p.Address.City())
 	s += fmt.Sprintln("Email: ", p.Email)
 	s += fmt.Sprintln("BestImprint: ", p.BestImprint)
 	s += fmt.Sprintln("Imprint:")
@@ -59,11 +77,15 @@ func (p MainPage) String() string {
 }
 
 func CSVHeader() string {
-	return fmt.Sprintln("Given, Redirect, MainUrl, Title, Address, Zip, City, Email", ImprintCSVHeader())
+	return fmt.Sprintln("Given,Error,Redirect,BaseUrl,Title,Street,Zip,City,Lat,Long,Email", ImprintCSVHeader())
 }
 
 func (p MainPage) CSV() string {
-	return fmt.Sprintln(p.Given, " ,", p.Redirect, " ,", p.MainUrl, " ,", p.Title, " ,", p.Address, " ,", p.Zip, " ,", p.City, " ,", p.Email, p.BestImprint.CSV())
+	errMsg := ""
+	if p.Err != nil {
+		errMsg = trim(p.Err.Error())
+	}
+	return fmt.Sprint(trimLinks(p.Given), ",", errMsg, ",", trimLinks(p.Redirect), ",", trimLinks(p.BaseUrl), ",", p.Title, ",", p.Address.Street(), ",", p.Address.Zip(), ",", p.Address.City(), ",", p.Address.Latitude(), ",", p.Address.Longitude(), ",", p.Email, p.BestImprint.CSV(), "\n")
 }
 
 type Imprint struct {
@@ -72,10 +94,8 @@ type Imprint struct {
 	Err  error
 
 	Name    string
-	Address string
-	Zip     string
-	City    string
-	Email   string
+	Address AddressCheck
+	Email   EMailCheck
 }
 
 func (i Imprint) String() string {
@@ -84,32 +104,41 @@ func (i Imprint) String() string {
 	s += fmt.Sprintln("\tError: ", i.Err)
 
 	s += fmt.Sprintln("\tName: ", i.Name)
-	s += fmt.Sprintln("\tAddress: ", i.Address)
-	s += fmt.Sprintln("\tZip: ", i.Zip)
-	s += fmt.Sprintln("\tCity: ", i.City)
+	s += fmt.Sprintln("\tStreet: ", i.Address.Street())
+	s += fmt.Sprintln("\tZip: ", i.Address.Zip())
+	s += fmt.Sprintln("\tCity: ", i.Address.City())
 	s += fmt.Sprintln("\tEmail: ", i.Email)
 
 	return s
 }
 
 func ImprintCSVHeader() string {
-	return fmt.Sprint(", Imprint-Address, Imprint-Zip, Imprint-City, Imprint-Email")
+	return fmt.Sprint(",Imprint-Url,Imprint-Street,Imprint-Zip,Imprint-City,Imprint-Lat,Imprint-Long,Imprint-Email")
 }
 
 func (i Imprint) CSV() string {
-	return fmt.Sprint(" ,", i.Address, " ,", i.Zip, " ,", i.City, " ,", i.Email)
+	return fmt.Sprint(",", trimLinks(i.Link), ",", i.Address.Street(), ",", i.Address.Zip(), ",", i.Address.City(), ",", i.Address.Latitude(), ",", i.Address.Longitude(), ",", i.Email)
 }
 
-func CrawlMainPages(links []string) *Cache {
-	cache := NewCache()
+func CrawlMainPages(links []string, version int) *Cache {
+	cache := NewCache(version)
 	cacheMutex := sync.Mutex{}
+	counter := 0
+	size := len(links)
+	wg := sync.WaitGroup{}
+	wg.Add(size)
 
-	pool := tunny.NewFunc(20, func(payload interface{}) interface{} {
+	pool := tunny.NewFunc(goRoutines, func(payload interface{}) interface{} {
 		var result []byte
 		link := payload.(string)
 
+		page := CrawlMainPage(link)
+
 		cacheMutex.Lock()
-		cache.MainPages[link] = CrawlMainPage(link)
+		counter++
+		fmt.Printf("\rProgress... %d/%d complete ", counter, size)
+		cache.MainPages[link] = page
+		wg.Done()
 		cacheMutex.Unlock()
 
 		return result
@@ -118,8 +147,11 @@ func CrawlMainPages(links []string) *Cache {
 
 	start := time.Now()
 	for _, link := range links {
-		pool.Process(link)
+		go pool.Process(link)
 	}
+
+	wg.Wait()
+	fmt.Println()
 	fmt.Println("Process time:", time.Since(start))
 
 	return cache
@@ -134,13 +166,16 @@ func CrawlMainPage(given string) MainPage {
 	}
 
 	link := getLinkFromGiven(given)
-	resp, err := http.Get(link)
+
+	resp, err := client.Get(link)
 	if err != nil {
 		mainPage.Err = err
 		return mainPage
 	}
 
 	mainPage.Redirect = resp.Request.URL.String()
+	mainPage.BaseUrl = fmt.Sprintf("%s://%s", resp.Request.URL.Scheme, resp.Request.URL.Host)
+
 	if mainPage.Redirect != link {
 		r := strings.Replace(mainPage.Redirect, "http://", "", 1)
 		r = strings.Replace(r, "http://", "", 1)
@@ -156,11 +191,6 @@ func CrawlMainPage(given string) MainPage {
 	defer resp.Body.Close()
 	z := html.NewTokenizer(resp.Body)
 
-	firstTitle := false
-	zipMatch := false
-	emailMatch := false
-	lastValue := ""
-
 	loop := true
 	for loop {
 		tokenType := z.Next()
@@ -175,6 +205,8 @@ func CrawlMainPage(given string) MainPage {
 			if token.Data == "a" {
 				// need the '<a>..</a>' token value
 				if z.Next() != html.TextToken {
+					blob := z.Token()
+					_ = blob
 					continue
 				}
 				tokenValue := z.Token()
@@ -182,38 +214,13 @@ func CrawlMainPage(given string) MainPage {
 				addImprint(mainPage, token, tokenValue)
 			}
 
-			if firstTitle == false && strings.ToLower(token.Data) == "title" {
-				// need the '<title>..</title>' token value
-				if z.Next() != html.TextToken {
-					continue
-				}
-				tokenValue := z.Token()
-				mainPage.Title = trim(tokenValue.String())
-				firstTitle = true
-			}
+			mainPage.Title.check(token, z)
 
 		case tokenType == html.TextToken:
-			token := z.Token()
-			value := token.String()
+			value := z.Token().String()
 
-			// check zip code
-			if zipMatch == false {
-				zipMatch, _ = regexp.MatchString("[0-9][0-9][0-9][0-9][0-9] [A-Z][a-z]", value)
-				if zipMatch {
-					mainPage.Address = trim(lastValue)
-					mainPage.Zip, mainPage.City = ZipCityTrimmer(value)
-				}
-			}
-
-			// check email
-			if emailMatch == false {
-				emailMatch, _ = regexp.MatchString("^[a-zA-Z0-9.!#$%&'*+/=?^_`{|}~-]+@[a-zA-Z0-9](?:[a-zA-Z0-9-]{0,61}[a-zA-Z0-9])?(?:\\.[a-zA-Z0-9](?:[a-zA-Z0-9-]{0,61}[a-zA-Z0-9])?)*$", value)
-				if emailMatch {
-					mainPage.Email = trim(value)
-				}
-			}
-
-			lastValue = value
+			mainPage.Address.check(value)
+			mainPage.Email.check(value)
 		}
 	}
 
@@ -288,10 +295,6 @@ func getHrefValue(token html.Token) string {
 	return ""
 }
 
-var client = http.Client{
-	Timeout: 5 * time.Second,
-}
-
 func crawlImprint(imprint *Imprint) {
 	// first try https
 	imprint.Link = strings.Replace(imprint.Link, "http://", "https://", 1)
@@ -311,50 +314,18 @@ func crawlImprint(imprint *Imprint) {
 	defer resp.Body.Close()
 	z := html.NewTokenizer(resp.Body)
 
-	zipMatch := false
-	emailMatch := false
-	lastValue := ""
-	lastLastValue := ""
-
 	for {
 		tokenType := z.Next()
 
 		switch {
 		case tokenType == html.ErrorToken:
-			if zipMatch == false {
-				imprint.Err = errors.New("address not found")
-			}
-
-			if emailMatch == false {
-				imprint.Err = errors.New("email not found")
-			}
 			return
 
 		case tokenType == html.TextToken:
-			token := z.Token()
-			value := token.String()
+			value := z.Token().String()
 
-			// check zip code
-			if zipMatch == false {
-				zipMatch, _ = regexp.MatchString("[0-9][0-9][0-9][0-9][0-9] [A-Z][a-z]", value)
-				if zipMatch {
-					imprint.Name = trim(lastLastValue)
-					imprint.Address = trim(lastValue)
-					imprint.Zip, imprint.City = ZipCityTrimmer(value)
-				}
-			}
-
-			// check email
-			if emailMatch == false {
-				emailMatch, _ = regexp.MatchString("^[a-zA-Z0-9.!#$%&'*+/=?^_`{|}~-]+@[a-zA-Z0-9](?:[a-zA-Z0-9-]{0,61}[a-zA-Z0-9])?(?:\\.[a-zA-Z0-9](?:[a-zA-Z0-9-]{0,61}[a-zA-Z0-9])?)*$", value)
-				if emailMatch {
-					imprint.Email = trim(value)
-				}
-			}
-
-			lastLastValue = lastValue
-			lastValue = value
-
+			imprint.Address.check(value)
+			imprint.Email.check(value)
 		}
 	}
 }
@@ -394,54 +365,38 @@ func concatLink(base string, ext string) string {
 func chooseBestImprint(mainPage *MainPage) {
 	var secondBest *Imprint
 	for _, imprint := range mainPage.Imprints {
-		if imprint.Zip != "" && imprint.Email != "" {
+		if imprint.Address.Zip() != "" && imprint.Email.String() != "" {
 			mainPage.BestImprint = imprint
 			return
 		}
-		if secondBest == nil && imprint.Zip != "" {
+		if secondBest == nil && imprint.Address.Zip() != "" {
 			secondBest = imprint
 		}
 	}
 
 	for _, imprint := range mainPage.Contacts {
-		if imprint.Zip != "" && imprint.Email != "" {
+		if imprint.Address.Zip() != "" && imprint.Email.String() != "" {
 			mainPage.BestImprint = imprint
 			return
 		}
-		if secondBest == nil && imprint.Zip != "" {
+		if secondBest == nil && imprint.Address.Zip() != "" {
 			secondBest = imprint
 		}
 	}
 
+	if secondBest == nil {
+		secondBest = &Imprint{}
+	}
 	mainPage.BestImprint = secondBest
 }
 
-func ZipCityTrimmer(zipLine string) (string, string) {
-	r, err := regexp.Compile("[0-9][0-9][0-9][0-9][0-9] [A-Z][a-z]")
-	if err != nil {
-		panic(err)
-	}
-	indexes := r.FindStringSubmatchIndex(zipLine)
-	if len(indexes) == 0 {
-		panic("Missing indexes")
-	}
-
-	zipStartIndex := indexes[0]
-	zip := zipLine[zipStartIndex : zipStartIndex+5]
-
-	cityEndIndex := strings.Index(zipLine[zipStartIndex+6:], " ")
-	if cityEndIndex == -1 {
-		cityEndIndex = len(zipLine)
-	} else {
-		cityEndIndex = zipStartIndex + 6 + cityEndIndex
-	}
-
-	return zip, trim(zipLine[zipStartIndex+6 : cityEndIndex])
+func trimLinks(link string) string {
+	return strings.Replace(link, ",", "%2C", -1)
 }
 
 func getLinkFromGiven(given string) string {
 	if atIndex := strings.Index(given, "@"); atIndex != -1 {
-		return given[atIndex+1:]
+		return "http://www." + given[atIndex+1:]
 	}
 	return given
 }

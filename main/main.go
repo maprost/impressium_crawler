@@ -1,29 +1,39 @@
 package main
 
 import (
-	"fmt"
-
 	"github.com/maprost/imprint_crawler"
 )
 
-func main() {
-	//fmt.Println(imprint_crawler.CrawlMainPage("https://www.platanus-schule.de/"))
-	//fmt.Println(imprint_crawler.CrawlMainPage("https://db.de"))
-	//fmt.Println(imprint_crawler.CrawlMainPage("https://www.deutschepost.de"))
+const (
+	testVersion = 0
+	liveVersion = 3
+)
 
-	links, err := imprint_crawler.GetLinks("main/Lernorte2.txt")
+const version = testVersion
+
+func main() {
+	var path string
+
+	switch version {
+	case testVersion:
+		path = "main/testVersion.txt"
+	case liveVersion:
+		path = "main/alleAnbieterUrlEmail.txt"
+	}
+
+	links, err := imprint_crawler.GetLinks(path)
 	if err != nil {
 		panic(err)
 	}
-	fmt.Println(len(links))
 
-	for _, l := range links {
-		fmt.Println(l)
-	}
-
-	cache := imprint_crawler.CrawlMainPages(links)
+	cache := imprint_crawler.CrawlMainPages(links, version)
 
 	err = cache.CSV()
+	if err != nil {
+		panic(err)
+	}
+
+	err = cache.ErrorCSV()
 	if err != nil {
 		panic(err)
 	}
